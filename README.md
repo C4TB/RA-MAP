@@ -7,3 +7,7 @@ In the EDA directory, you'll find markdown documents summarizing our outlier det
 The "Imputing_clinical.md" file describes our procedure for imputing gender and height.
 
 The "DEA.md" file summarizes our differential expression analyses for transcriptomic data, testing for associations with disease and response.
+
+UPSETR figure summarising overlap between multi-omic samples in the TACERA cohort
+![image](https://user-images.githubusercontent.com/14093101/118146230-4bd53700-b406-11eb-899a-e5116aebf484.png)
+
