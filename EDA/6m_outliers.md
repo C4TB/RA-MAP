@@ -144,7 +144,7 @@ outliers <- c(
 # These samples appear mislabelled, but have no evident intra-patient swaps
   's1', 's440', 's1055', 
 # These samples are far from any cell type, indicating technical issues
-  's11', 's35', 's200', 's250', 's686', 's1053'
+  's11', 's35', 's200', 's250', 's686'
 )
 clin <- clin[!s %in% outliers]
 
