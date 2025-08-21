@@ -1,0 +1,325 @@
+---
+title: "RAMAP DE Analysis 6m vs Baseline (Blood subsets, Fig 6)"
+author: "Graham R Smith"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+  df_print: paged
+word_document: default
+pdf_document: default
+---
+  
+
+  
+```{r global_options, include=FALSE}
+# echo=FALSE,
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+
+```
+
+ Load libraries
+
+```{r libraries}
+
+  
+library(limma)
+library(readr)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(plotly)
+
+library(clusterProfiler)
+library(enrichplot)
+library(annotables) # for grch38
+library(msigdbr)
+
+```
+
+This based in part on Simon's script in ~/data/PSORT/weatherhead_microarray_data and stuff David W has sent 
+
+Load data
+
+```{r load_data}
+
+
+outd <- "../results/TIME6m"
+if (! dir.exists(outd))
+  dir.create(outd, recursive = TRUE)
+datad <- "/data/ngrs2/RA-MAP/data/RAMAP_Aug20/RAMAP_data/"
+expr <- read_rds(file.path(datad, "microarray_dat.rds"))
+d_in <- read_csv(file.path(datad, "clin.csv"))
+
+cell_types <- sort(unique(d_in$CELL))
+
+```
+
+select samples and run DE analysis, model ~ Patient_ID + TIME, contrast 6m vs 0m, for each of `r cell_types`
+
+(For CD14, remove outlier samples "2007612374" "2008043875" "2006663587" "2007056466" (all 6m))
+
+```{r main_prog_time6m}
+
+tt_all <- NULL
+gsea_list <- list()
+# cell = "CD14"
+for (cell in cell_types) {
+  cat("\n\ndoing", cell, "\n")
+  # select samples 
+  # make var to use in labels and output file names
+  if (cell == "WB" ){
+    cell_out <- "WHL"
+  } else {
+    cell_out <- cell
+  }
+  
+  d <- filter(d_in, CELL == cell)
+  # outliers in CD14 (see older html)
+  d <- filter(d, ! Sample_ID %in% c("2007612374", "2008043875", "2006663587", "2007056466"))
+  
+  mat <- expr[, d$Sample_ID]
+  
+  
+  ## PCA
+  pca <- prcomp(t(mat))
+  pdat <- as.data.frame(pca$x) %>% rownames_to_column("Sample_ID") %>% 
+    left_join(select(d, Sample_ID, GENDER, TIME))
+  p <- ggplot(pdat, aes(x = PC1, y = PC2, label = Sample_ID)) + geom_point(aes(col = TIME), size = 2) + 
+    ggtitle(cell_out) + theme_bw(base_size = 14)
+  show(p)
+  # ggplotly(p)
+  # to ID CD14 points print(filter(pdat, PC1 < -75) %>% select(1,2,3)) 
+ 
+  p <- ggplot(pdat, aes(x = PC1, y = PC2, label = Sample_ID)) + geom_point(aes(col = GENDER), size = 2) + 
+    ggtitle(cell_out) + theme_bw(base_size = 14)
+  # show(p)
+ 
+  
+  ## DE 
+  
+  design <- model.matrix(~ Patient_ID + TIME , data = d)
+  
+  fit <- lmFit(mat, design)
+  fit <- eBayes(fit)
+  
+  tt <- topTable(fit, coef="TIME6m", number = Inf, sort.by = "P") %>% rownames_to_column("Symbol")
+  
+  # histo of DEGs to see effect size 
+  p <- ggplot(tt, aes(x = logFC)) + geom_histogram() + 
+    ggtitle(paste0(cell_out, " TIME6m")) + theme_bw(base_size = 14)
+  show(p)
+  filter(tt, abs(logFC) > 0.25) %>% nrow()
+  
+  # output DEGs
+  outfile <- paste0(cell_out, "_TIME6m.all.txt")
+  write_tsv(tt, file = file.path(outd, outfile))
+  cat("made", file.path(outd,outfile), "\n")
+  
+  # combine into large df tt_all
+  tt_un <- topTable(fit, coef="TIME6m", number = Inf, sort.by = "none") %>% rownames_to_column("Symbol")
+  idx <- 2:ncol(tt_un)
+  names(tt_un)[idx] <- paste0(names(tt_un)[idx], "_", cell_out)
+  if (is.null(tt_all))
+    tt_all <- tt_un
+  else
+    tt_all <- left_join(tt_all, tt_un, by = "Symbol")
+  
+  
+  # volcano plot 
+  vp <- ggplot(tt, aes(x = logFC, y = -log10(adj.P.Val))) + geom_point(size = 0.2) +
+    ggtitle(paste0(cell_out, " TIME6m")) + theme_bw(base_size = 14)
+  
+  IGS <- c("IFI6", "IFI44L","OAS1", "ISG15", "MX1", "HERC5", "IFIT1", "RSAD2", "OAS2", "IFI27")
+  
+  vp <- vp + geom_label(data = filter(tt, Symbol %in% IGS), aes(label = Symbol), size = 2, col = 2, nudge_y = 1.2) + 
+    geom_point(data = filter(tt, Symbol %in% IGS), size = 2, col = 2) + 
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") 
+  show(vp)
+  
+
+# boxplot of samples  
+  gene <- "ISG15"
+  tempd <- cbind(d, mat[gene,])
+  names(tempd)[length(tempd)] <- gene
+  p <- ggplot(tempd, aes(col = TIME, y = .data[[gene]])) + ylab(paste0(gene, " Expression")) + 
+    geom_boxplot()  + theme_bw(base_size = 14)
+  show(p)
+  
+  # ```{r gsea}
+  
+  genevec <- tt$logFC
+  names(genevec) <- tt$Symbol
+  genevec <- sort(genevec, decreasing = TRUE) %>% na.omit()
+  H_t2gg <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+    dplyr::select(gs_name, gene_symbol) %>%
+    mutate(gs_name = gsub("HALLMARK_", "", gs_name))
+  
+  #                nPerm = 10000,  ; exponent = 0 or 1 makes a difference 
+  # does it make sense consider clusterProfiler::compareCluster 
+  # https://yulab-smu.top/biomedical-knowledge-mining-book/clusterprofiler-comparecluster.html?q=compareCluster#formula-interface-of-comparecluster
+  hh_gse <- GSEA(geneList = genevec, 
+                 exponent = 0,
+                 eps = 0, 
+                 TERM2GENE = H_t2gg,
+                 minGSSize = 3, 
+                 maxGSSize = 800, 
+                 pvalueCutoff = 0.05, 
+                 pAdjustMethod = "BH")
+  # Oh, the split argument is useful! Uses sign of NES 
+  # Geom_point argument puts a circle around each point (see newOR)  
+  dp <- dotplot(hh_gse, showCategory = 10, label_format = 70, split=".sign") + facet_grid(.~.sign) + 
+    ggtitle(paste0("GSEA: Hallmark: ", cell_out, " TIME6m vs BL")) + 
+    scale_color_distiller(palette = "Blues", direction = -1) + 
+     geom_point(shape = 1, stroke = 1, color = 1)  + theme_bw(base_size = 14)
+  
+  show(dp)
+  outfile <- paste0(cell_out, "_TIME6m.GSEA_Hallmark.jpg")
+  ggsave(dp, file = file.path(outd, outfile), height = 5, width = 8)
+  cat("made", file.path(outd,outfile), "\n")
+  outfile <- paste0(cell_out, "_TIME6m.GSEA_Hallmark.txt")
+  write_tsv(as.data.frame(hh_gse), file = file.path(outd, outfile))
+  cat("made", file.path(outd,outfile), "\n")
+  gsea_list[[cell_out]] <- hh_gse
+}
+
+  outfile <- "allcell_TIME6m.all.txt"
+  write_tsv(tt_all, file = file.path(outd, outfile))
+  cat("made", file.path(outd,outfile), "\n")
+  
+  ## 11/12/24
+  # I thought i could use compareCluster on a list of results, but it doesn't seem to work that way. 
+  # https://yulab-smu.top/biomedical-knowledge-mining-book/clusterprofiler-comparecluster.html
+  # what is meant by "activated" and "suppressed" in dotplot(split= .sign); see
+  # https://support.bioconductor.org/p/9156222/
+```
+
+test stuff 
+
+Look for association of expression at baseline (0m) with DAS28 remission (< 2.6). First add delta_DAS and DAS_Remission variables...
+
+
+```{r add_change_vars}
+ggplot(filter(d_in, TIME == "0m"), aes(x = DAS28.0M)) + geom_histogram() 
+ggplot(filter(d_in, TIME == "6m"), aes(x = DAS28.6M)) + geom_histogram() 
+
+d_in <- mutate(d_in, DAS_REM = ifelse(DAS28.6M < 2.6, 1, 0))
+d_in <- mutate(d_in, DELTA_DAS = DAS28.6M - DAS28.0M)
+
+```
+
+
+Then acutally run the remission tests 
+
+```{r main_prog_assoc_rem}
+
+outd2 = "../results/DAS_REM/"
+if (! dir.exists(outd2))
+  dir.create(outd2, recursive = TRUE)
+
+# cell = "WB"
+for (cell in cell_types) {
+  cat("\n\ndoing", cell, "\n")
+  # select samples 
+  # make var to use in labels and output file names
+  if (cell == "WB" ){
+    cell_out <- "WHL"
+  } else {
+    cell_out <- cell
+  }
+  
+  d <- filter(d_in, CELL == cell & TIME == "0m")
+  # outliers in CD14 (see older html)
+  d <- filter(d, ! Sample_ID %in% c("2007612374", "2008043875", "2006663587", "2007056466"))
+  
+  mat <- expr[, d$Sample_ID]
+  
+  
+  ## PCA
+  pca <- prcomp(t(mat))
+  pdat <- as.data.frame(pca$x) %>% rownames_to_column("Sample_ID") %>% 
+    left_join(select(d, Sample_ID, GENDER, TIME, DELTA_DAS, DAS_REM))
+  p <- ggplot(pdat, aes(x = PC1, y = PC2, label = Sample_ID)) + geom_point(aes(col = factor(DAS_REM)), size = 2) + 
+    ggtitle(cell_out) + theme_bw(base_size = 14)
+  show(p)
+  # ggplotly(p)
+  # to ID CD14 points print(filter(pdat, PC1 < -75) %>% select(1,2,3)) 
+ 
+  p <- ggplot(pdat, aes(x = PC1, y = PC2, label = Sample_ID)) + geom_point(aes(col = GENDER), size = 2) + 
+    ggtitle(cell_out) + theme_bw(base_size = 14)
+  # show(p)
+ 
+  
+  ## DE 
+  
+  design <- model.matrix(~ DAS_REM , data = d)
+  
+  fit <- lmFit(mat, design)
+  fit <- eBayes(fit)
+  
+  tt <- topTable(fit, coef="DAS_REM", number = Inf, sort.by = "P") %>% rownames_to_column("Symbol")
+  
+  # histo of DEGs to see effect size 
+  p <- ggplot(tt, aes(x = logFC)) + geom_histogram() + 
+    ggtitle(paste0(cell_out, " DAS_REM")) + theme_bw(base_size = 14)
+  show(p)
+  filter(tt, abs(logFC) > 0.25) %>% nrow()
+  
+  # volcano plot 
+  vp <- ggplot(tt, aes(x = logFC, y = -log10(adj.P.Val))) + geom_point(size = 0.2) +
+    ggtitle(paste0(cell_out, " DAS_REM")) + theme_bw(base_size = 14)
+  
+  IGS <- c("IFI6", "IFI44L","OAS1", "ISG15", "MX1", "HERC5", "IFIT1", "RSAD2", "OAS2", "IFI27")
+  
+  vp <- vp + geom_label(data = filter(tt, Symbol %in% IGS), aes(label = Symbol), size = 2, col = 2) + 
+    geom_point(data = filter(tt, Symbol %in% IGS), size = 2, col = 2) + 
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") 
+  show(vp)
+  
+# output DEGs
+  outfile <- paste0(cell_out, "_DAS_REM.all.txt")
+  write_tsv(tt, file = file.path(outd2, outfile))
+  
+# boxplot of samples  
+  gene <- "ISG15"
+  tempd <- cbind(d, mat[gene,])
+  names(tempd)[length(tempd)] <- gene
+  p <- ggplot(tempd, aes(col = TIME, y = .data[[gene]])) + ylab(paste0(gene, " Expression")) + 
+    geom_boxplot()  + theme_bw(base_size = 14)
+  show(p)
+  
+  # ```{r gsea}
+  
+  genevec <- tt$logFC
+  names(genevec) <- tt$Symbol
+  genevec <- sort(genevec, decreasing = TRUE) %>% na.omit()
+  H_t2gg <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+    dplyr::select(gs_name, gene_symbol) %>%
+    mutate(gs_name = gsub("HALLMARK_", "", gs_name))
+  
+  #                nPerm = 10000,  ; exponent = 0 or 1 makes a difference 
+  # does it make sense consider clusterProfiler::compareCluster 
+  # https://yulab-smu.top/biomedical-knowledge-mining-book/clusterprofiler-comparecluster.html?q=compareCluster#formula-interface-of-comparecluster
+  hh_gse <- GSEA(geneList = genevec, 
+                 exponent = 0,
+                 eps = 0, 
+                 TERM2GENE = H_t2gg,
+                 minGSSize = 3, 
+                 maxGSSize = 800, 
+                 pvalueCutoff = 0.05, 
+                 pAdjustMethod = "BH")
+  # Oh, the split argument is useful! Uses sign of NES 
+  # Geom_point argument puts a circle around each point (see newOR)  
+  dp <- dotplot(hh_gse, showCategory = 10, label_format = 70, split=".sign") + facet_grid(.~.sign) + 
+    ggtitle(paste0("GSEA: Hallmark: ", cell_out, " DAS_REM")) + 
+    scale_color_distiller(palette = "Blues", direction = -1) + 
+     geom_point(shape = 1, stroke = 1, color = 1)  + theme_bw(base_size = 14)
+  
+  show(dp)
+  
+  outfile <- paste0(cell_out, "_DAS_REM.GSEA_Hallmark.txt")
+  write_tsv(as.data.frame(hh_gse), file = file.path(outd2, outfile))
+  
+}
+
+```
+

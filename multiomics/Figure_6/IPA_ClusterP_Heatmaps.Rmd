@@ -1,0 +1,417 @@
+---
+title: "RAMAP 6m vs Baseline Heatmaps (Blood subsets, Fig 6)"
+author: "Graham R Smith"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+  df_print: paged
+word_document: default
+pdf_document: default
+---
+
+todo: remove if(false) blocks 
+
+```{r global_options, include=FALSE}
+# echo=FALSE,
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+
+```
+
+Set paths 
+
+```{r set_var}
+
+  indir <- "../results/TIME6m/from_ipa/FCcut1.2" 
+  outdir <- indir
+```
+ 
+ Load libraries
+
+```{r libraries}
+
+library(readr)
+library(dplyr)
+library(tibble)
+library(circlize)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(openxlsx)
+
+```
+
+functions
+
+```{r dec_functions}
+
+nazero = function(x){ifelse(is.na(x), 0, x)}
+get_dendro = function(m){
+  mcp <- m
+  mcp[is.na(mcp)] <- 0 
+  hclust(dist(mcp))
+}
+
+write_gene_spreadsh = function(du1, wb, topn = 20, type, sheetname){
+  # type is "CP" or "UR"
+  # output at most topn rows (nr cols in spreadsheet)
+  # wb is openxlsx workbook. 
+  # this function does not write to file, that is done outside
+  n = min(20, nrow(du1))
+  ug = list()
+  for (i in 1:n) {
+    if(type == "UR"){
+      # Upstream Regulator      Expr Log Ratio  Molecule Type   Predicted Activation State      Activation z-score      p-value of overlap      Target Molecules in Dataset     Mechanistic Network
+      nm = du1$`Upstream Regulator`[i]
+      ug[[nm]] = strsplit(du1$`Target Molecules in Dataset`, ",")[[i]]
+    } else {
+      #Ingenuity Canonical Pathways    -log(p-value)   Ratio   z-score Molecules
+      nm = du1$`Ingenuity Canonical Pathways`[i]
+      ug[[nm]] = strsplit(du1$`Molecules`, ",")[[i]]
+    }
+    
+  }
+  # make list into DF, padding with NA (see stackoverflow)
+  ug_df <- as.data.frame(sapply(ug, "length<-", max(lengths(ug))))
+  openxlsx::addWorksheet(wb, sheetname)
+  openxlsx::writeData(wb, sheetname, ug_df)
+  wb
+}
+
+get_col_fun_p = function(db1df) {
+  mat <- as.matrix(db1df)
+  colorRamp2(c(0, max(mat, na.rm = T)), 
+             c("white", "red") )
+  #col_fun = colorRamp2(seq(min(db1df,na.rm=T), 1+max(db1df,na.rm=T), length.out = 9), 
+  #                     brewer.pal(9,"YlOrRd"))
+  # c("white", "red")
+}
+
+
+get_col_fun_z = function(db1df) {
+  mat <- as.matrix(db1df)
+  q <- max(abs(mat), na.rm = T)
+  colorRamp2(c(-q, 0, q), 
+             c("blue", "white", "orange") )
+  #col_fun = colorRamp2(seq(min(db1df,na.rm=T), 1+max(db1df,na.rm=T), length.out = 9), 
+  #                     brewer.pal(9,"YlOrRd"))
+  # c("white", "red")
+}
+
+```
+
+
+rest - Heatmap
+
+```{r}
+
+# based on IPA_adal_ust_comparison_2021_2.0rev4
+
+
+da <- list()
+cell_types <- c("CD14", "CD4",  "CD8",  "PBMC", "WHL")
+for (cell in cell_types) {
+  
+  
+  ################################################################
+  # 1 # upstream regulators --------
+  ################################################################
+  
+
+  duin = read_tsv(file.path(indir, paste0("UR_", cell, ".txt")), skip = 2)
+  #[1] "Upstream Regulator"          "Expr Log Ratio"              "Molecule Type"              
+  #[4] "Predicted Activation State"  "Activation z-score"          "p-value of overlap"         
+  #[#7] "Target Molecules in Dataset" "Mechanistic Network" 
+  # might have bias flagged - remove if so 
+  if ("Flags" %in% names(duin))
+    duin <- select(duin, -Flags)
+  names(duin) <- c("Upstream_Regulator", "Log_Ratio", "Type",              
+                   "Activ_State", "Zscore", "pvalue",        
+                   "Target_Molecules", "Mechanistic_Network") 
+  duin <- mutate(duin, adjP = p.adjust(pvalue, method = "fdr"))
+  # filter(duin, adjP < 0.05) %>% dim()
+  da[[cell]] <- duin 
+}
+# input files are sorted by p-value initially
+
+# how to combine? full join on name, keep Zscore, 
+# make sure top 5 or 10 are there? (if padj < 0.05)
+top_urvec = c()
+for (cell in cell_types) {
+  urs <- filter(da[[cell]], adjP < 0.05) %>% head(n=10) %>% pull(Upstream_Regulator) 
+  top_urvec <- unique(c(top_urvec, urs))
+}
+zsmat <- select(da[[1]], Upstream_Regulator, Zscore) 
+names(zsmat)[2] <- cell_types[1]
+for (i in 2:5) {
+  submat <- select(da[[i]], Upstream_Regulator, Zscore)
+  names(submat)[2] <- cell_types[i]
+  zsmat <- full_join(zsmat, submat, by = "Upstream_Regulator")
+}
+# ind <- apply(zsmat[,2:6], 1, function(x) all(is.na(x)))
+
+# Note : a lot have all or most UR Zscores of NA (activity pattern not recognizable). Remove them.
+# 
+zsmat <- filter(zsmat, Upstream_Regulator %in% top_urvec) 
+ind <- apply(zsmat[,2:6], 1, function(x) sum(is.na(x)) >= 4)
+cat("removing", zsmat$Upstream_Regulator[ind], "because Zscore mostly NA\n")
+zsmat <- zsmat[!ind, ]
+
+zsmat <- column_to_rownames(zsmat, var = "Upstream_Regulator") %>% as.matrix
+
+hm.zs <- Heatmap(zsmat,
+        cluster_rows = TRUE, cluster_columns = FALSE, 
+        row_names_side = "left", column_names_side = "top",
+        column_names_rot = 45, name = "Zscore")
+show(hm.zs)
+
+```
+
+pvalue heatmap 
+```{r pvhm}
+
+pvmat <- select(da[[1]], Upstream_Regulator, adjP) 
+names(pvmat)[2] <- cell_types[1]
+for (i in 2:5) {
+  submat <- select(da[[i]], Upstream_Regulator, adjP)
+  names(submat)[2] <- cell_types[i]
+  pvmat <- full_join(pvmat, submat, by = "Upstream_Regulator")
+}
+# ind <- apply(pvmat[,2:6], 1, function(x) all(is.na(x)))
+
+# Note : a lot have all or most UR adjPs of NA (activity pattern not recognizable). Remove them.
+# 
+indep = FALSE
+if (indep) {
+pvmat <- filter(pvmat, Upstream_Regulator %in% top_urvec) 
+ind <- apply(pvmat[,2:6], 1, function(x) sum(is.na(x)) >= 4)
+cat("removing", pvmat$Upstream_Regulator[ind], "because adjP mostly NA\n")
+pvmat <- pvmat[!ind, ]
+} else {
+  pvmat <- filter(pvmat, Upstream_Regulator %in% rownames(zsmat)) 
+  
+}
+pvmat <- column_to_rownames(pvmat, var = "Upstream_Regulator") %>% as.matrix
+
+pvmat <- -log10(pvmat)
+col_fun = colorRamp2(c(0, 8), c("white", "orange"))
+hm.pv <- Heatmap(pvmat,
+        cluster_rows = TRUE, cluster_columns = FALSE, 
+        row_names_side = "left", column_names_side = "top",
+        column_names_rot = 45, name = "-log10(adjP)",
+        col = col_fun)
+show(hm.pv)
+
+
+```
+```{r more}
+draw(hm.zs + hm.pv, column_title = "IPA Top Upstream Regulators", column_title_gp = gpar(fontsize = 16))
+
+outfile = file.path(outdir, "IPA_UR_Heatmap.png")
+png(outfile, width = 2100, height = 1500, res = 300)
+draw(hm.zs + hm.pv, column_title = "IPA Top Upstream Regulators", column_title_gp = gpar(fontsize = 16))
+dev.off()
+cat("made ", outfile, "\n")
+
+```
+Canonical pathways
+
+```{r cpway}
+da <- list()
+cell_types <- c("CD14", "CD4",  "CD8",  "PBMC", "WHL")
+for (cell in cell_types) {
+  
+  
+  ################################################################
+  # 2 # canonical pathways --------
+  ################################################################
+  
+
+  dpin = read_tsv(file.path(indir, paste0("CP_", cell, ".txt")), skip = 2)
+  #[1] "Upstream Regulator"          "Expr Log Ratio"              "Molecule Type"              
+  #[4] "Predicted Activation State"  "Activation z-score"          "p-value of overlap"         
+  #[#7] "Target Molecules in Dataset" "Mechanistic Network" 
+  # might have bias flagged - remove if so 
+  if ("Flags" %in% names(dpin))
+    dpin <- select(dpin, -Flags)
+  names(dpin) <- c("Canonical_Pathway", "Log_pvalue", "Ratio",              
+                   "Zscore", "Molecules", "X") 
+  dpin <- mutate(dpin, adjP = p.adjust(10^-Log_pvalue, method = "fdr"))
+  # filter(dpin, adjP < 0.05) %>% dim()
+  da[[cell]] <- dpin 
+}
+# input files are sorted by p-value initially
+
+# how to combine? full join on name, keep Zscore, 
+# make sure top 5 or 10 are there? (if padj < 0.05)
+top_cpvec = c()
+for (cell in cell_types) {
+  cps <- filter(da[[cell]], adjP < 0.05) %>% head(n=20) %>% pull(Canonical_Pathway) 
+  top_cpvec <- unique(c(top_cpvec, cps))
+}
+zsmat <- select(da[[1]], Canonical_Pathway, Zscore) 
+names(zsmat)[2] <- cell_types[1]
+for (i in 2:5) {
+  submat <- select(da[[i]], Canonical_Pathway, Zscore)
+  names(submat)[2] <- cell_types[i]
+  zsmat <- full_join(zsmat, submat, by = "Canonical_Pathway")
+}
+# ind <- apply(zsmat[,2:6], 1, function(x) all(is.na(x)))
+
+# Note : a lot have all or most cp Zscores of NA (activity pattern not recognizable). Remove them.
+# 
+zsmat <- filter(zsmat, Canonical_Pathway %in% top_cpvec) 
+ind <- apply(zsmat[,2:6], 1, function(x) sum(is.na(x)) >= 4)
+cat("removing", zsmat$Canonical_Pathway[ind], "because Zscore mostly NA\n")
+zsmat <- zsmat[!ind, ]
+
+zsmat <- column_to_rownames(zsmat, var = "Canonical_Pathway") %>% as.matrix
+
+        #row_names_max_width = max_text_width(
+        #rownames(zsmat), 
+        #gp = gpar(fontsize = 12)
+        
+hm.zs <- Heatmap(zsmat,
+        cluster_rows = TRUE, cluster_columns = FALSE, 
+        row_names_side = "left", column_names_side = "top",
+        row_names_max_width = unit(10,"cm"),
+        name = "Zscore")
+show(hm.zs)
+
+```
+
+```{r cppv}
+
+pvmat <- select(da[[1]], Canonical_Pathway, adjP) 
+names(pvmat)[2] <- cell_types[1]
+for (i in 2:5) {
+  submat <- select(da[[i]], Canonical_Pathway, adjP)
+  names(submat)[2] <- cell_types[i]
+  pvmat <- full_join(pvmat, submat, by = "Canonical_Pathway")
+}
+# ind <- apply(pvmat[,2:6], 1, function(x) all(is.na(x)))
+
+# Note : a lot have all or most UR adjPs of NA (activity pattern not recognizable). Remove them.
+# 
+indep = FALSE
+if (indep) {
+pvmat <- filter(pvmat, Canonical_Pathway %in% top_urvec) 
+ind <- apply(pvmat[,2:6], 1, function(x) sum(is.na(x)) >= 4)
+cat("removing", pvmat$Canonical_Pathway[ind], "because adjP mostly NA\n")
+pvmat <- pvmat[!ind, ]
+} else {
+  pvmat <- filter(pvmat, Canonical_Pathway %in% rownames(zsmat)) 
+  
+}
+pvmat <- column_to_rownames(pvmat, var = "Canonical_Pathway") %>% as.matrix
+
+pvmat <- -log10(pvmat)
+col_fun = colorRamp2(c(0, 8), c("white", "orange"))
+hm.pv <- Heatmap(pvmat,
+        cluster_rows = TRUE, cluster_columns = FALSE, 
+        row_names_side = "left", column_names_side = "top",
+        name = "-log10(adjP)",
+        row_names_max_width = unit(10,"cm"),
+        col = col_fun)
+show(hm.pv)
+
+```
+CP ZS and PV
+
+```{r more}
+draw(hm.zs + hm.pv, column_title = "IPA Top Canonical Pathways", column_title_gp = gpar(fontsize = 16))
+
+```
+
+### got here 20/02/25 
+### reload GSEA toptalbes made in limma.Rmd 
+names like 
+../results/TIME6m/PBMC_TIME6m.GSEA_Hallmark.txt
+
+```{r gsea_heatmap}
+
+indir <- "../results/TIME6m"
+dg <- list()
+cell_types <- c("CD14", "CD4",  "CD8",  "PBMC", "WHL")
+for (cell in cell_types) {
+  
+  
+  ################################################################
+  # 1 # upstream regulators --------
+  ################################################################
+  
+
+  dgin = read_tsv(file.path(indir, paste0(cell, "_TIME6m.GSEA_Hallmark.txt")))
+  # [1] "ID"              "Description"     "setSize"         "enrichmentScore" "NES"             "pvalue"          "p.adjust"       
+ # [8] "qvalue"          "rank"            "leading_edge"    "core_enrichment"
+  # old[1] "Upstream Regulator"          "Expr Log Ratio"              "Molecule Type"              
+  #[4] "Predicted Activation State"  "Activation z-score"          "p-value of overlap"         
+  #[#7] "Target Molecules in Dataset" "Mechanistic Network" 
+  # might have bias flagged - remove if so 
+
+  dg[[cell]] <- dgin 
+}
+# input files are sorted by p-value initially
+
+# how to combine? full join on name, keep Zscore, 
+# make sure top 5 or 10 are there? (if padj < 0.05) hpvec for hallmark pathway
+top_hpvec <- c()
+for (cell in cell_types) {
+  hps <- filter(dg[[cell]], p.adjust < 0.05) %>% head(n=10) %>% pull(ID) 
+  top_hpvec <- unique(c(top_hpvec, hps))
+}
+#make matrix like 
+# ID                                 CD14       CD4        CD8         PBMC      WHL
+# <chr>                             <dbl>     <dbl>      <dbl>        <dbl>    <dbl>
+#1 INTERFERON_ALPHA_RESPONSE 0.00000000510 0.0000162  0.0000128 0.0000000488  0.00360
+#2 INTERFERON_GAMMA_RESPONSE 0.000000698   0.0000186  0.0000427 0.000000307  NA
+# 
+hppmat <- select(dg[[1]], ID, NES, p.adjust) 
+# mutate to get signed p
+hppmat <- mutate(hppmat, signed_adjp = -sign(NES)*log10(p.adjust))
+hppmat <- select(hppmat, ID, signed_adjp)
+names(hppmat)[2] <- cell_types[1]
+for (i in 2:5) {
+  submat <- select(dg[[i]], ID, NES, p.adjust)
+  submat <- mutate(submat, signed_adjp = -sign(NES)*log10(p.adjust))
+  submat <- select(submat, ID, signed_adjp)
+  names(submat)[2] <- cell_types[i]
+  hppmat <- full_join(hppmat, submat, by = "ID")
+}
+
+
+# ind <- apply(hppmat[,2:6], 1, function(x) all(is.na(x)))
+
+# Note : a lot have all or most hp Zscores of NA (activity pattern not recognizable). Remove them.
+# 
+hppmat <- filter(hppmat, ID %in% top_hpvec) 
+ind <- apply(hppmat[,2:6], 1, function(x) sum(is.na(x)) >= 4)
+if (any(ind)) {
+  cat("removing", hppmat$ID[ind], "because pval mostly NA\n")
+  hppmat <- hppmat[!ind, ]
+}
+
+hppmat <- column_to_rownames(hppmat, var = "ID") %>% as.matrix
+
+hm.spv <- Heatmap(hppmat,
+        cluster_rows = TRUE, cluster_columns = FALSE, 
+        row_names_side = "left", column_names_side = "top",
+        column_title = "GSEA: Hallmark: Time6m vs BL", column_title_gp = gpar(fontsize = 16), 
+        row_names_max_width = max_text_width(
+          rownames(hppmat), 
+          gp = gpar(fontsize = 14)
+        ),
+        column_names_rot = 45, name = "-log10(adjP)*Sign(NES)")
+draw(hm.spv)
+outdir <- indir
+outfile = file.path(outdir, "GSEA_Hallmark_Heatmap.png")
+png(outfile, width = 2100, height = 1500, res = 300)
+draw(hm.spv)
+dev.off()
+
+```
+
+### END ####
+
+```{r wrapup}
+sessionInfo()
+```
+
